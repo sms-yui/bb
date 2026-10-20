@@ -197,7 +197,10 @@ import { verifyDesktopSessionCookie } from "./desktop-session.js";
 import { SECURE_DESKTOP_SESSION_COOKIE as DESKTOP_SESSION_COOKIE } from "./cloud-dev.js";
 import { handleAssignMachineLabel } from "./machine-label.js";
 import { serveWithCache } from "./cache.js";
-import { RESP_HEAD_TIMEOUT_MS } from "./response-head-timeout.js";
+import {
+  POOLED_IMAGE_RESP_HEAD_TIMEOUT_MS,
+  RESP_HEAD_TIMEOUT_MS,
+} from "./response-head-timeout.js";
 import { RELAY_HEADER } from "./protocol-headers.js";
 import worker, { relativeTime, wantsHtml } from "./worker.js";
 import {
@@ -1174,6 +1177,35 @@ describe("gate request deadline", () => {
       RESP_HEAD_TIMEOUT_MS,
     );
 
+    expect(response.status).toBe(504);
+    expect(await response.text()).toContain("(stage: response-head)");
+  });
+
+  it("waits six minutes for the head of a pooled image request", async () => {
+    const socket = new SilentRelaySocket();
+    const { env, ctx } = makeEnv(() => relayUpgrade(socket));
+    let settled = false;
+    const pending = worker
+      .fetch(
+        visitorRequest(
+          "sawyer.getbb.app",
+          "/api/v1/plugins/account-pool/http/v1/images/edits",
+          { method: "POST", headers: machineHeaders, body: "{}" },
+        ),
+        { ...env, WORKER_HELD_RESPONSES: "on" } as never,
+        ctx,
+      )
+      .then((response) => {
+        settled = true;
+        return response;
+      });
+
+    await vi.advanceTimersByTimeAsync(RESP_HEAD_TIMEOUT_MS);
+    expect(settled).toBe(false);
+    const response = await settle(
+      pending,
+      POOLED_IMAGE_RESP_HEAD_TIMEOUT_MS - RESP_HEAD_TIMEOUT_MS,
+    );
     expect(response.status).toBe(504);
     expect(await response.text()).toContain("(stage: response-head)");
   });
@@ -2590,6 +2622,71 @@ describe("TunnelDO voice transcription response head", () => {
     try {
       const { pending, settled } = await voicePost();
       await vi.advanceTimersByTimeAsync(89_999);
+      expect(settled()).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await pending).status).toBe(504);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("TunnelDO pooled image response head", () => {
+  async function imagePost() {
+    const sent: Uint8Array[] = [];
+    const state = mockDoState({ protocolVersion: 1 });
+    const dob = new TunnelDO(state.api, makeDoEnv());
+    await state.restore;
+    const tunnel = fakeTunnelSocket(captureSent(sent));
+    state.addSocket(tunnel, ["tunnel"]);
+    let settled = false;
+    const pending = Promise.resolve(
+      dob.fetch(
+        new Request(
+          "https://do.internal/api/v1/plugins/account-pool/http/v1/images/generations",
+          { method: "POST", body: "{}" },
+        ),
+      ),
+    ).then((response) => {
+      settled = true;
+      return response;
+    });
+    return {
+      dob,
+      tunnel,
+      pending,
+      streamId: openHttpStreamId(sent, 0),
+      settled: () => settled,
+    };
+  }
+
+  it("relays an image whose head arrives after five minutes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { dob, tunnel, pending, streamId, settled } = await imagePost();
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(settled()).toBe(false);
+      dob.webSocketMessage(
+        tunnel,
+        frameBuffer({
+          type: "resp-head",
+          streamId,
+          status: 200,
+          headers: [["content-type", "application/json"]],
+        }),
+      );
+      dob.webSocketMessage(tunnel, frameBuffer({ type: "body-end", streamId }));
+      expect((await pending).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers 504 after six minutes without a head", async () => {
+    vi.useFakeTimers();
+    try {
+      const { pending, settled } = await imagePost();
+      await vi.advanceTimersByTimeAsync(POOLED_IMAGE_RESP_HEAD_TIMEOUT_MS - 1);
       expect(settled()).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       expect((await pending).status).toBe(504);

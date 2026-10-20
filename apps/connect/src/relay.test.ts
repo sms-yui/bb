@@ -9,7 +9,10 @@ import {
   RELAY_METHOD_HEADER,
   TUNNEL_TARGET_HEADER,
 } from "./protocol-headers.js";
-import { RESP_HEAD_TIMEOUT_MS } from "./response-head-timeout.js";
+import {
+  POOLED_IMAGE_RESP_HEAD_TIMEOUT_MS,
+  RESP_HEAD_TIMEOUT_MS,
+} from "./response-head-timeout.js";
 import {
   fetchThroughRelay,
   relayUpgradeRequest,
@@ -337,6 +340,102 @@ describe("fetchThroughRelay", () => {
       const { stub } = upgradedWith(socket);
       const pending = fetchThroughRelay(stub, request, newProgress());
       await vi.advanceTimersByTimeAsync(30_000);
+      const response = await pending;
+      expect(response?.status).toBe(504);
+    });
+  });
+
+  describe("pooled image response head", () => {
+    const POOL_ROUTE = "/api/v1/plugins/account-pool/http";
+
+    function imageRequest(
+      path = `${POOL_ROUTE}/v1/images/edits`,
+      init: { method?: string; headers?: Record<string, string> } = {},
+    ) {
+      return new Request(`https://sawyer.getbb.app${path}`, {
+        method: init.method ?? "POST",
+        ...(init.method === "GET" ? {} : { body: "{}" }),
+        headers: init.headers ?? {},
+      });
+    }
+
+    it.each([
+      `${POOL_ROUTE}/v1/images/generations`,
+      `${POOL_ROUTE}/v1/images/edits`,
+    ])(
+      "relays an image from %s whose head arrives after five minutes",
+      async (path) => {
+        vi.useFakeTimers();
+        const socket = new FakeRelaySocket();
+        const { stub } = upgradedWith(socket);
+        let settled = false;
+        const pending = fetchThroughRelay(
+          stub,
+          imageRequest(path),
+          newProgress(),
+        ).then((response) => {
+          settled = true;
+          return response;
+        });
+        await vi.advanceTimersByTimeAsync(300_000);
+        expect(settled).toBe(false);
+        socket.deliver({
+          type: "resp-head",
+          streamId: STREAM_ID,
+          status: 200,
+          headers: [["content-type", "application/json"]],
+        });
+        socket.deliver({
+          type: "body-chunk",
+          streamId: STREAM_ID,
+          data: new TextEncoder().encode('{"data":[]}'),
+        });
+        socket.deliver({ type: "body-end", streamId: STREAM_ID });
+        const response = await pending;
+        expect(response?.status).toBe(200);
+        await expect(response?.json()).resolves.toEqual({ data: [] });
+      },
+    );
+
+    it("answers 504 and closes the relay after six minutes without a head", async () => {
+      vi.useFakeTimers();
+      const socket = new FakeRelaySocket();
+      const { stub } = upgradedWith(socket);
+      let settled = false;
+      const pending = fetchThroughRelay(
+        stub,
+        imageRequest(),
+        newProgress(),
+      ).then((response) => {
+        settled = true;
+        return response;
+      });
+      await vi.advanceTimersByTimeAsync(POOLED_IMAGE_RESP_HEAD_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const response = await pending;
+      expect(response?.status).toBe(504);
+      expect(socket.closes).toHaveLength(1);
+    });
+
+    it.each([
+      ["a GET of an image path", imageRequest(undefined, { method: "GET" })],
+      [
+        "a port share at an image path",
+        imageRequest(undefined, {
+          headers: { [TUNNEL_TARGET_HEADER]: "8000" },
+        }),
+      ],
+      [
+        "a pooled Responses request",
+        imageRequest(`${POOL_ROUTE}/v1/responses`),
+      ],
+    ])("keeps the 30 second head deadline for %s", async (_name, request) => {
+      vi.useFakeTimers();
+      const socket = new FakeRelaySocket();
+      const { stub } = upgradedWith(socket);
+      const pending = fetchThroughRelay(stub, request, newProgress());
+      await vi.advanceTimersByTimeAsync(RESP_HEAD_TIMEOUT_MS);
       const response = await pending;
       expect(response?.status).toBe(504);
     });
