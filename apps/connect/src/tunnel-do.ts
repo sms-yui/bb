@@ -7,6 +7,7 @@ import {
   server,
 } from "@bb/connect-db";
 import {
+  HEAD_PENDING_HEADER,
   HEARTBEAT_REQUEST,
   HEARTBEAT_RESPONSE,
   TUNNEL_PROTOCOL_QUERY_PARAM,
@@ -18,6 +19,7 @@ import {
   type Frame,
   type HeaderPair,
 } from "@bb/tunnel-contract";
+import { workerHeldResponsesEnabled } from "./relay.js";
 import { relayedResponse } from "./response-encoding.js";
 import { responseHeadTimeoutMs } from "./response-head-timeout.js";
 import {
@@ -25,6 +27,7 @@ import {
   HOP_HEADERS,
   RELAY_CONTENT_LENGTH_HEADER,
   RELAY_HAS_BODY_HEADER,
+  RELAY_HEAD_PENDING_HEADER,
   RELAY_HEADER,
   RELAY_METHOD_HEADER,
   TUNNEL_TARGET_HEADER,
@@ -81,6 +84,7 @@ function forwardableHeaders(headers: Headers): HeaderPair[] {
 interface SocketAttachment {
   streamId?: number;
   relay?: boolean;
+  headPending?: boolean;
   done?: boolean;
 }
 
@@ -406,7 +410,13 @@ export class TunnelDO {
     const pair = new WebSocketPair();
     this.state.acceptWebSocket(pair[1], [TUNNEL_TAG]);
     setTimeout(() => this.wakeTunnelWaiters(), 0);
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    return new Response(null, {
+      status: 101,
+      webSocket: pair[0],
+      headers: workerHeldResponsesEnabled(this.env)
+        ? { [HEAD_PENDING_HEADER]: "1" }
+        : {},
+    });
   }
 
   private async recordTunnelGap(host: string, now: number): Promise<void> {
@@ -517,7 +527,11 @@ export class TunnelDO {
     if (!opened) return this.offlineResponse();
 
     const pair = new WebSocketPair();
-    const attachment: SocketAttachment = { streamId, relay: true };
+    const attachment: SocketAttachment = {
+      streamId,
+      relay: true,
+      headPending: request.headers.get(RELAY_HEAD_PENDING_HEADER) === "1",
+    };
     pair[1].serializeAttachment(attachment);
     this.state.acceptWebSocket(pair[1], [`${RELAY_TAG_PREFIX}${streamId}`]);
     return new Response(null, {
@@ -572,10 +586,17 @@ export class TunnelDO {
       head.type === "resp-head" ||
       head.type === "body-chunk" ||
       head.type === "body-end" ||
-      head.type === "close-stream";
+      head.type === "close-stream" ||
+      head.type === "head-pending";
     if (!isResponseFrame || this.pendingHttp.has(head.streamId)) return false;
     const relay = this.relaySocket(head.streamId);
     if (relay === null) return false;
+    if (
+      head.type === "head-pending" &&
+      (relay.deserializeAttachment() as SocketAttachment).headPending !== true
+    ) {
+      return true;
+    }
     try {
       relay.send(message);
     } catch {}
@@ -864,6 +885,7 @@ export class TunnelDO {
         } catch {}
         return;
       }
+      case "head-pending":
       case "ws-open-ack":
         return;
       case "open-http":

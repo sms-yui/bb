@@ -27,6 +27,7 @@ describe("tunnel traffic snapshot", () => {
   it("reports in-flight streams, bytes each way, and how long each direction has been quiet", () => {
     const tunnel = new FakeTunnel();
     const session = new TunnelSession({
+      sendsHeadPending: false,
       tunnel: tunnel as unknown as NodeWebSocket,
       log: { warn: () => {} },
       resolveOrigin: () => ({ kind: "unregistered" }),

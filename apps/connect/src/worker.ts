@@ -807,6 +807,7 @@ export default {
       stage: "routing",
       tunnelObjectAttempts: 0,
       routingKey: null,
+      headPending: () => {},
     };
     const requestUrl = new URL(request.url);
     try {

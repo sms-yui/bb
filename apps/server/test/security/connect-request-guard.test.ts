@@ -45,6 +45,7 @@ it("carries Connect HTTP and WebSocket requests through the host guard", async (
   const relay = await connected;
   const baseUrl = server.baseUrl;
   session = new TunnelSession({
+    sendsHeadPending: false,
     tunnel: client,
     log: { warn: () => {} },
     resolveOrigin: () => ({

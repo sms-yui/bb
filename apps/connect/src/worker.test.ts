@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { decodeFrame, encodeFrame, type Frame } from "@bb/tunnel-contract";
+import {
+  HEAD_PENDING_HEADER,
+  decodeFrame,
+  encodeFrame,
+  type Frame,
+} from "@bb/tunnel-contract";
 import {
   GATE_OAUTH_CLIENT_HEADER,
   GATE_OAUTH_GRANT_HEADER,
@@ -1174,6 +1179,48 @@ describe("gate request deadline", () => {
       RESP_HEAD_TIMEOUT_MS,
     );
 
+    expect(response.status).toBe(504);
+    expect(await response.text()).toContain("(stage: response-head)");
+  });
+
+  it("extends the head deadline while the tunnel client reports a slow origin", async () => {
+    const socket = new SilentRelaySocket();
+    const { env, ctx } = makeEnv(() => relayUpgrade(socket));
+    let settled = false;
+    const pending = worker
+      .fetch(
+        visitorRequest("sawyer.getbb.app", "/api/v1/plugins/x/http/slow", {
+          method: "POST",
+          headers: machineHeaders,
+          body: "{}",
+        }),
+        { ...env, WORKER_HELD_RESPONSES: "on" } as never,
+        ctx,
+      )
+      .then((response) => {
+        settled = true;
+        return response;
+      });
+    const reportPending = () => {
+      const bytes = encodeFrame({ type: "head-pending", streamId: 1 });
+      const event = new Event("message");
+      Object.defineProperty(event, "data", {
+        value: bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ),
+      });
+      socket.dispatchEvent(event);
+    };
+
+    await vi.advanceTimersByTimeAsync(10);
+    for (let elapsed = 0; elapsed < 5 * 60_000; elapsed += 10_000) {
+      reportPending();
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
+    expect(settled).toBe(false);
+
+    const response = await settle(pending, RESP_HEAD_TIMEOUT_MS);
     expect(response.status).toBe(504);
     expect(await response.text()).toContain("(stage: response-head)");
   });
@@ -3103,6 +3150,62 @@ describe("TunnelDO restarts after its tunnel socket vanishes", () => {
   });
 });
 
+describe("TunnelDO head-pending advertisement", () => {
+  const RealResponse = globalThis.Response;
+
+  afterEach(() => {
+    globalThis.Response = RealResponse;
+    delete (globalThis as { WebSocketPair?: unknown }).WebSocketPair;
+  });
+
+  it.each([
+    { relay: "on", advertised: "1" },
+    { relay: undefined, advertised: null },
+  ])(
+    "advertises head-pending on the tunnel 101 only with worker-held responses ($relay)",
+    async ({ relay, advertised }) => {
+      class WorkersResponse extends RealResponse {
+        readonly webSocket: WebSocket | null;
+        constructor(
+          body?: BodyInit | null,
+          init?: ResponseInit & { webSocket?: WebSocket | null },
+        ) {
+          if (init?.webSocket != null) {
+            super(null, { status: 200, headers: init.headers });
+            Object.defineProperty(this, "status", { value: init.status });
+            this.webSocket = init.webSocket;
+          } else {
+            super(body ?? null, init);
+            this.webSocket = null;
+          }
+        }
+      }
+      class FakeWebSocketPair {
+        0 = fakeTunnelSocket();
+        1 = fakeTunnelSocket();
+      }
+      globalThis.Response = WorkersResponse as never;
+      (globalThis as { WebSocketPair?: unknown }).WebSocketPair =
+        FakeWebSocketPair;
+      const state = mockDoState({ protocolVersion: 1 });
+      const dob = new TunnelDO(state.api, {
+        ...makeDoEnv(),
+        ...(relay !== undefined ? { WORKER_HELD_RESPONSES: relay } : {}),
+      });
+      await state.restore;
+
+      const upgrade = await dob.fetch(
+        new Request("https://do.internal/__tunnel?v=1", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+
+      expect(upgrade.status).toBe(101);
+      expect(upgrade.headers.get(HEAD_PENDING_HEADER)).toBe(advertised);
+    },
+  );
+});
+
 describe("TunnelDO holds visitors while a lost tunnel redials", () => {
   const RealResponse = globalThis.Response;
 
@@ -3549,6 +3652,44 @@ describe("TunnelDO worker-held relay", () => {
     const sentBeforeClose = tunnelSent.length;
     dob.webSocketClose(relay.socket, 1000, "done");
     expect(tunnelSent).toHaveLength(sentBeforeClose);
+  });
+
+  it("hands head-pending frames to a relay that opted in without finishing it", async () => {
+    const { dob, tunnel, tunnelSent } = await connected();
+    const relay = fakeRelaySocket();
+    installRelayPair(relay.socket);
+    await dob.fetch(
+      relayUpgrade("/api/v1/plugins/x/http/slow", {
+        "x-bb-relay-head-pending": "1",
+      }),
+    );
+    const streamId = openHttpStreamId(tunnelSent, 0);
+
+    dob.webSocketMessage(tunnel, frameBuffer({ type: "head-pending", streamId }));
+
+    expect(relay.sent.map((bytes) => decodeFrame(bytes))).toEqual([
+      { type: "head-pending", streamId },
+    ]);
+    expect(relay.close).not.toHaveBeenCalled();
+  });
+
+  it("withholds head-pending frames from a relay that cannot decode them", async () => {
+    const { dob, tunnel, tunnelSent } = await connected();
+    const relay = fakeRelaySocket();
+    installRelayPair(relay.socket);
+    await dob.fetch(relayUpgrade("/api/v1/plugins/x/http/slow"));
+    const streamId = openHttpStreamId(tunnelSent, 0);
+
+    dob.webSocketMessage(tunnel, frameBuffer({ type: "head-pending", streamId }));
+    dob.webSocketMessage(
+      tunnel,
+      frameBuffer({ type: "resp-head", streamId, status: 200, headers: [] }),
+    );
+
+    expect(relay.sent.map((bytes) => decodeFrame(bytes).type)).toEqual([
+      "resp-head",
+    ]);
+    expect(relay.close).not.toHaveBeenCalled();
   });
 
   it("re-addresses request body frames from the relay and refuses any other frame", async () => {

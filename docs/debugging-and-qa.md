@@ -101,7 +101,16 @@ embedded browser session is not implemented by this cache.
 The gate answers every proxied request within the response-head timeout (30 s,
 90 s for voice transcription) from when the Worker receives it; a miss gets a
 504 naming the stuck stage: `routing`, `tunnel-object`, `request-body`,
-`response-head`, or `finishing`. Workers Logs keeps only about 1% of gate
+`response-head`, or `finishing`. While a tunnel client waits on a slow plugin
+HTTP route (`/api/v1/plugins/<id>/http/...`), it sends a `head-pending` frame
+every 10 s. Each frame moves the
+`response-head` deadline to 30 s after that frame, up to 15 minutes after the
+request arrived. Connect advertises support with `x-bb-tunnel-head-pending: 1`
+on the tunnel's 101 response when worker-held responses are on. Clients send
+the frame only when they see that header. Each relay opts in with
+`x-bb-relay-head-pending: 1`, and the TunnelDO forwards frames only to relays
+that did.
+Older clients never send it and keep the fixed deadline. Workers Logs keeps only about 1% of gate
 requests, so the gate also writes these to the Analytics Engine dataset
 `bb_connect_gate_events` (`bb_connect_gate_events_staging` on staging):
 

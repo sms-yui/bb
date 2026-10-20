@@ -1,9 +1,11 @@
+import type { IncomingMessage } from "node:http";
 import { WebSocket as NodeWebSocket } from "ws";
 import {
   PROTOCOL_VERSION,
   TUNNEL_PROTOCOL_QUERY_PARAM,
 } from "@bb/tunnel-contract";
 import {
+  acceptsHeadPending,
   humanizeTransportError,
   ReconnectBackoff,
   TunnelSession,
@@ -348,6 +350,10 @@ export class ConnectTunnelClient {
     let connectedAt = 0;
     let socketSession: TunnelSession | undefined;
     let rejectedStatus: number | undefined;
+    let sendsHeadPending = false;
+    socket.on("upgrade", (response: IncomingMessage) => {
+      sendsHeadPending = acceptsHeadPending(response);
+    });
     socket.on("open", () => {
       if (this.socket !== socket || !this.hasConnectIntent()) {
         socket.terminate();
@@ -363,6 +369,7 @@ export class ConnectTunnelClient {
             this.options.logger.warn({ label: identity.label }, message),
         },
         resolveOrigin: (target) => this.resolveOrigin(target),
+        sendsHeadPending,
       });
       this.session = socketSession;
       socketSession.start();

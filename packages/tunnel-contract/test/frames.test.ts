@@ -171,6 +171,11 @@ describe("frame round-trips", () => {
       code: 1000,
       reason: "done",
     });
+
+    expect(roundTrip({ type: "head-pending", streamId: 21 })).toEqual({
+      type: "head-pending",
+      streamId: 21,
+    });
   });
 
   it("decodes from an ArrayBuffer (worker message shape)", () => {

@@ -5,11 +5,15 @@ import type { GateProgress } from "./gate-deadline.js";
 import {
   RELAY_CONTENT_LENGTH_HEADER,
   RELAY_HAS_BODY_HEADER,
+  RELAY_HEAD_PENDING_HEADER,
   RELAY_HEADER,
   RELAY_METHOD_HEADER,
   TUNNEL_TARGET_HEADER,
 } from "./protocol-headers.js";
-import { RESP_HEAD_TIMEOUT_MS } from "./response-head-timeout.js";
+import {
+  MAX_RESP_HEAD_WAIT_MS,
+  RESP_HEAD_TIMEOUT_MS,
+} from "./response-head-timeout.js";
 import {
   fetchThroughRelay,
   relayUpgradeRequest,
@@ -74,7 +78,12 @@ function upgradedWith(socket: FakeRelaySocket, relayHeader = "1") {
 const STREAM_ID = 7;
 
 function newProgress(): GateProgress {
-  return { stage: "routing", tunnelObjectAttempts: 0, routingKey: null };
+  return {
+    stage: "routing",
+    tunnelObjectAttempts: 0,
+    routingKey: null,
+    headPending: () => {},
+  };
 }
 
 afterEach(() => {
@@ -102,6 +111,7 @@ describe("relay upgrade request", () => {
     expect(upgrade.headers.get(RELAY_HEADER)).toBe("1");
     expect(upgrade.headers.get(RELAY_METHOD_HEADER)).toBe("POST");
     expect(upgrade.headers.get(RELAY_HAS_BODY_HEADER)).toBe("1");
+    expect(upgrade.headers.get(RELAY_HEAD_PENDING_HEADER)).toBe("1");
     expect(upgrade.headers.get("content-length")).toBeNull();
     expect(upgrade.headers.get(RELAY_CONTENT_LENGTH_HEADER)).toBe("11");
     expect(upgrade.headers.get("content-type")).toBe("application/json");
@@ -470,5 +480,76 @@ describe("fetchThroughRelay", () => {
     ]);
     expect(request.bodyUsed).toBe(false);
     expect(socket.sent).toEqual([]);
+  });
+});
+
+describe("head-pending frames", () => {
+  async function slowRelay(progress = newProgress()) {
+    vi.useFakeTimers();
+    const socket = new FakeRelaySocket();
+    const { stub } = upgradedWith(socket);
+    let settled = false;
+    const pending = fetchThroughRelay(
+      stub,
+      new Request("https://sawyer.getbb.app/api/v1/plugins/x/http/slow", {
+        method: "POST",
+        body: "{}",
+      }),
+      progress,
+    ).then((response) => {
+      settled = true;
+      return response;
+    });
+    await vi.waitFor(() => expect(socket.accepted).toBe(true));
+    return { socket, pending, settled: () => settled };
+  }
+
+  async function reportPendingFor(socket: FakeRelaySocket, ms: number) {
+    for (let elapsed = 0; elapsed < ms; elapsed += 10_000) {
+      socket.deliver({ type: "head-pending", streamId: STREAM_ID });
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
+  }
+
+  it("keeps waiting for a slow origin while the tunnel client reports it", async () => {
+    const headPending = vi.fn();
+    const { socket, pending, settled } = await slowRelay({
+      ...newProgress(),
+      headPending,
+    });
+    await reportPendingFor(socket, 5 * 60_000);
+    expect(settled()).toBe(false);
+    expect(headPending).toHaveBeenCalledTimes(30);
+    socket.deliver({
+      type: "resp-head",
+      streamId: STREAM_ID,
+      status: 200,
+      headers: [["content-type", "application/json"]],
+    });
+    socket.deliver({ type: "body-end", streamId: STREAM_ID });
+    expect((await pending)?.status).toBe(200);
+  });
+
+  it("answers 504 once the reports stop for the base head deadline", async () => {
+    const { socket, pending, settled } = await slowRelay();
+    await reportPendingFor(socket, 60_000);
+    await vi.advanceTimersByTimeAsync(RESP_HEAD_TIMEOUT_MS - 10_000 + 999);
+    expect(settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await pending)?.status).toBe(504);
+    expect(socket.closes).toHaveLength(1);
+  });
+
+  it("answers 504 at the hard cap even while reports continue", async () => {
+    const { socket, pending, settled } = await slowRelay();
+    await reportPendingFor(socket, MAX_RESP_HEAD_WAIT_MS - 10_000);
+    expect(settled()).toBe(false);
+    socket.deliver({ type: "head-pending", streamId: STREAM_ID });
+    await vi.advanceTimersByTimeAsync(10_000 + 1_000);
+    const response = await pending;
+    expect(response?.status).toBe(504);
+    await expect(response?.text()).resolves.toContain(
+      "timed out waiting for the tunnel client",
+    );
   });
 });

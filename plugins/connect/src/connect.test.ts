@@ -1013,6 +1013,7 @@ describe("TunnelSession routing", () => {
 
     const sharedPorts = new Set([share.port]);
     const session = new TunnelSession({
+      sendsHeadPending: false,
       tunnel: client,
       log: {
         info: () => {},
@@ -1149,6 +1150,7 @@ describe("TunnelSession routing", () => {
     const relay = await relayReady;
 
     const session = new TunnelSession({
+      sendsHeadPending: false,
       tunnel: client,
       log: {
         info: () => {},
@@ -1238,6 +1240,7 @@ describe("TunnelSession routing", () => {
     const infoMessages: string[] = [];
 
     const session = new TunnelSession({
+      sendsHeadPending: false,
       tunnel: client,
       log: {
         info: (message) => infoMessages.push(message),
@@ -1353,6 +1356,7 @@ describe("TunnelSession routing", () => {
 
     const remoteClientsSeen: number[] = [];
     const session = new TunnelSession({
+      sendsHeadPending: false,
       tunnel: client,
       log: {
         info: () => {},

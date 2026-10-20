@@ -41,6 +41,7 @@ describe("tunnel origin failures", () => {
       const tunnel = new FakeTunnel();
       const warnings: string[] = [];
       const session = new TunnelSession({
+        sendsHeadPending: false,
         tunnel: tunnel as unknown as NodeWebSocket,
         log: { warn: (message) => warnings.push(message) },
         monotonicNow: () => now,
@@ -160,6 +161,7 @@ describe("tunnel origin failures", () => {
     const tunnel = new FakeTunnel();
     const warnings: string[] = [];
     const session = new TunnelSession({
+      sendsHeadPending: false,
       tunnel: tunnel as unknown as NodeWebSocket,
       log: { warn: (message) => warnings.push(message) },
       resolveOrigin: () => ({

@@ -29,6 +29,7 @@ function startSession() {
   const warnings: string[] = [];
   let monotonicMs = 0;
   const session = new TunnelSession({
+    sendsHeadPending: false,
     tunnel: tunnel as unknown as NodeWebSocket,
     log: { warn: (message) => warnings.push(message) },
     resolveOrigin: () => ({ kind: "unregistered" }),

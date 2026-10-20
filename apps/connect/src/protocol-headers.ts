@@ -7,6 +7,7 @@ export const RELAY_HEADER = "x-bb-relay";
 export const RELAY_METHOD_HEADER = "x-bb-relay-method";
 export const RELAY_HAS_BODY_HEADER = "x-bb-relay-has-body";
 export const RELAY_CONTENT_LENGTH_HEADER = "x-bb-relay-content-length";
+export const RELAY_HEAD_PENDING_HEADER = "x-bb-relay-head-pending";
 
 export const HOP_HEADERS: ReadonlySet<string> = new Set([
   "connection",
@@ -24,4 +25,5 @@ export const HOP_HEADERS: ReadonlySet<string> = new Set([
   RELAY_METHOD_HEADER,
   RELAY_HAS_BODY_HEADER,
   RELAY_CONTENT_LENGTH_HEADER,
+  RELAY_HEAD_PENDING_HEADER,
 ]);

@@ -67,6 +67,7 @@ async function startOrigin(): Promise<number> {
 
 function openDownload(tunnel: FakeTunnel, port: number): TunnelSession {
   const session = new TunnelSession({
+    sendsHeadPending: false,
     tunnel: tunnel as unknown as NodeWebSocket,
     log: { warn: () => {} },
     resolveOrigin: () => ({

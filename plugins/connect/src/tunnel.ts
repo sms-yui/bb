@@ -12,6 +12,7 @@ import {
   TUNNEL_REPLACED_CLOSE_REASON,
 } from "@bb/tunnel-contract";
 import {
+  acceptsHeadPending,
   humanizeTransportError,
   ReconnectBackoff,
   TunnelSession,
@@ -489,7 +490,9 @@ export class ConnectTunnel {
     }, TUNNEL_HANDSHAKE_TIMEOUT_MS);
     handshakeDeadline.unref?.();
 
+    let sendsHeadPending = false;
     tunnel.on("upgrade", (response: IncomingMessage) => {
+      sendsHeadPending = acceptsHeadPending(response);
       diagnostics.upgradeMs = Date.now() - dialStartedAt;
       const ray = response.headers["cf-ray"];
       if (typeof ray === "string") {
@@ -509,6 +512,7 @@ export class ConnectTunnel {
         tunnel,
         log: this.options.log,
         resolveOrigin: (target) => this.resolveStreamOrigin(target),
+        sendsHeadPending,
         onRemoteClientsChange: (count) => {
           this.remoteClients = count;
           this.publish();

@@ -8,18 +8,23 @@ import {
   HOP_HEADERS,
   RELAY_CONTENT_LENGTH_HEADER,
   RELAY_HAS_BODY_HEADER,
+  RELAY_HEAD_PENDING_HEADER,
   RELAY_HEADER,
   RELAY_METHOD_HEADER,
 } from "./protocol-headers.js";
 import type { GateProgress } from "./gate-deadline.js";
 import { relayedResponse } from "./response-encoding.js";
-import { responseHeadTimeoutMs } from "./response-head-timeout.js";
+import {
+  headPendingDeadlineAt,
+  responseHeadTimeoutMs,
+} from "./response-head-timeout.js";
 
 const RELAY_DONE_CLOSE_CODE = 1000;
 const RELAY_PLACEHOLDER_STREAM_ID = 0;
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 const MAX_CLOSE_REASON_BYTES = 123;
 const VISITOR_CANCELED_REASON = "visitor canceled response body";
+const HEAD_PENDING_GATE_LEAD_MS = 1_000;
 
 export interface RelayStub {
   fetch(request: Request): Promise<Response>;
@@ -68,6 +73,7 @@ export function relayUpgradeRequest(request: Request): Request {
   headers.set(RELAY_HEADER, "1");
   headers.set(RELAY_METHOD_HEADER, request.method);
   headers.set(RELAY_HAS_BODY_HEADER, request.body === null ? "0" : "1");
+  headers.set(RELAY_HEAD_PENDING_HEADER, "1");
   return new Request(request.url, { method: "GET", headers });
 }
 
@@ -151,9 +157,24 @@ function relayResponse(
       new URL(request.url),
       request.headers,
     );
-    const headTimeout = setTimeout(() => {
+    const startedAt = Date.now();
+    let headDeadlineAt = startedAt + headTimeoutMs;
+    const onHeadTimeout = () => {
       fail(504, "timed out waiting for the tunnel client");
-    }, headTimeoutMs);
+    };
+    let headTimeout = setTimeout(onHeadTimeout, headTimeoutMs);
+    const onHeadPending = () => {
+      if (headSettled) return;
+      progress.headPending();
+      const now = Date.now();
+      const extendedAt =
+        headPendingDeadlineAt(startedAt, now) + HEAD_PENDING_GATE_LEAD_MS;
+      if (extendedAt > headDeadlineAt) {
+        headDeadlineAt = extendedAt;
+        clearTimeout(headTimeout);
+        headTimeout = setTimeout(onHeadTimeout, extendedAt - now);
+      }
+    };
 
     const onHead = (frame: Extract<Frame, { type: "resp-head" }>) => {
       if (headSettled) return;
@@ -213,6 +234,9 @@ function relayResponse(
           return;
         case "close-stream":
           fail(502, `tunnel client aborted: ${frame.reason}`);
+          return;
+        case "head-pending":
+          onHeadPending();
           return;
         default:
           return;

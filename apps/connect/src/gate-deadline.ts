@@ -1,3 +1,5 @@
+import { headPendingDeadlineAt } from "./response-head-timeout.js";
+
 export type GateStage =
   | "routing"
   | "tunnel-object"
@@ -9,6 +11,7 @@ export interface GateProgress {
   stage: GateStage;
   tunnelObjectAttempts: number;
   routingKey: string | null;
+  headPending: () => void;
 }
 
 export interface GateDelay {
@@ -72,6 +75,8 @@ export async function withGateDeadline({
       elapsedMs,
       tunnelObjectAttempts: progress.tunnelObjectAttempts,
     });
+  const startedAt = Date.now();
+  let deadlineAt = startedAt + deadlineMs;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const slowTimer =
     slowAfterMs === null
@@ -79,6 +84,15 @@ export async function withGateDeadline({
       : setTimeout(() => report("slow", slowAfterMs), slowAfterMs);
   const deadline = new Promise<typeof STALLED>((resolve) => {
     deadlineTimer = setTimeout(() => resolve(STALLED), deadlineMs);
+    progress.headPending = () => {
+      if (progress.stage !== "response-head") return;
+      const now = Date.now();
+      const extendedAt = headPendingDeadlineAt(startedAt, now);
+      if (extendedAt <= deadlineAt) return;
+      deadlineAt = extendedAt;
+      clearTimeout(deadlineTimer);
+      deadlineTimer = setTimeout(() => resolve(STALLED), extendedAt - now);
+    };
   });
   const work = run();
   try {
@@ -89,7 +103,7 @@ export async function withGateDeadline({
     clearTimeout(slowTimer);
   }
   discardLateResponse(work);
-  report("stall", deadlineMs);
+  report("stall", Date.now() - startedAt);
   return new Response(
     `bb connect: timed out ${STALL_MESSAGES[progress.stage]} (stage: ${progress.stage})\n`,
     {

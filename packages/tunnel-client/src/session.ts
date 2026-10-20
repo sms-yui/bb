@@ -6,6 +6,8 @@ import {
 import { request as httpsRequest } from "node:https";
 import { WebSocket as NodeWebSocket } from "ws";
 import {
+  HEAD_PENDING_HEADER,
+  HEAD_PENDING_INTERVAL_MS,
   HEARTBEAT_REQUEST,
   HEARTBEAT_RESPONSE,
   chunkBody,
@@ -29,6 +31,7 @@ const MAX_REFUSED_ORIGINS = 1024;
 
 const UNREGISTERED_PORT_BODY = "this port is not shared";
 const textEncoder = new TextEncoder();
+const PLUGIN_HTTP_PATH = /^\/api\/v1\/plugins\/[^/]+\/http\//u;
 const INITIAL_THREAD_LOAD_PATH =
   /^\/api\/v1\/threads\/[^/]+\/(?:timeline|conversation-outline)(?:\?|$)/u;
 
@@ -87,6 +90,10 @@ function roundDurationMs(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
 }
 
+export function acceptsHeadPending(upgrade: IncomingMessage): boolean {
+  return upgrade.headers[HEAD_PENDING_HEADER] === "1";
+}
+
 export function isBareBbRealtimeWs(
   path: string,
   target: string | undefined,
@@ -99,6 +106,7 @@ interface HttpStream {
   meta: OpenHttpFrame;
   chunks: Buffer[];
   abort: AbortController;
+  openedAt: number;
 }
 interface WsStream {
   socket: NodeWebSocket;
@@ -131,6 +139,7 @@ interface TunnelSessionOptions {
   tunnel: NodeWebSocket;
   log: TunnelClientLogger;
   resolveOrigin: (target: string | undefined) => StreamOriginResult;
+  sendsHeadPending: boolean;
   onRemoteClientsChange?: (remoteClients: number) => void;
   onActivity?: (at: number) => void;
   monotonicNow?: () => number;
@@ -234,6 +243,10 @@ export class TunnelSession {
     this.setRemoteClients(0);
   }
 
+  private monotonicNow(): number {
+    return this.options.monotonicNow?.() ?? performance.now();
+  }
+
   private noteActivity(): void {
     const at = Date.now();
     this.lastRemoteActivityAt = at;
@@ -285,6 +298,7 @@ export class TunnelSession {
           meta: frame,
           chunks: [],
           abort: new AbortController(),
+          openedAt: this.monotonicNow(),
         };
         this.httpStreams.set(frame.streamId, stream);
         if (!frame.hasBody) void this.executeHttp(frame.streamId, stream);
@@ -331,6 +345,7 @@ export class TunnelSession {
       }
       case "resp-head":
       case "ws-open-ack":
+      case "head-pending":
         return;
     }
   }
@@ -425,6 +440,27 @@ export class TunnelSession {
       loopbackOrigin: new URL(resolved.origin).origin,
       ...(resolved.host !== undefined ? { host: resolved.host } : {}),
     });
+    const reportsPending =
+      this.options.sendsHeadPending &&
+      meta.target === undefined &&
+      PLUGIN_HTTP_PATH.test(meta.path);
+    if (
+      reportsPending &&
+      this.monotonicNow() - stream.openedAt >= HEAD_PENDING_INTERVAL_MS
+    ) {
+      this.send({ type: "head-pending", streamId });
+    }
+    const headPending = reportsPending
+      ? setInterval(
+          () => this.send({ type: "head-pending", streamId }),
+          HEAD_PENDING_INTERVAL_MS,
+        )
+      : undefined;
+    stream.abort.signal.addEventListener(
+      "abort",
+      () => clearInterval(headPending),
+      { once: true },
+    );
     try {
       const startedAt = performance.now();
       const body = meta.hasBody ? Buffer.concat(stream.chunks) : undefined;
@@ -435,6 +471,7 @@ export class TunnelSession {
         body,
         signal: stream.abort.signal,
       });
+      clearInterval(headPending);
       this.refusedOrigins.delete(resolved.origin);
       const originTtfbMs = performance.now() - startedAt;
       const respHeaders = responseHeaderPairs(res);
@@ -489,6 +526,7 @@ export class TunnelSession {
         });
       }
     } finally {
+      clearInterval(headPending);
       this.httpStreams.delete(streamId);
     }
   }

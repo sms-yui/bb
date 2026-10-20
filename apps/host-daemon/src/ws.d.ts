@@ -32,6 +32,7 @@ declare module "ws" {
     on(event: "close", listener: () => void): this;
     on(event: "close", listener: (code: number, reason: Buffer) => void): this;
     on(event: "error", listener: (error: Error) => void): this;
+    on(event: "upgrade", listener: (response: IncomingMessage) => void): this;
     on(
       event: "unexpected-response",
       listener: (request: unknown, response: IncomingMessage) => void,

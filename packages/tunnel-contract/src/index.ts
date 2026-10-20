@@ -9,6 +9,9 @@ export const TUNNEL_REPLACED_CLOSE_REASON =
 
 export const MAX_CHUNK_BYTES = 1024 * 1024;
 
+export const HEAD_PENDING_HEADER = "x-bb-tunnel-head-pending";
+export const HEAD_PENDING_INTERVAL_MS = 10_000;
+
 const FRAME_TYPE = {
   openHttp: 1,
   bodyChunk: 2,
@@ -18,6 +21,7 @@ const FRAME_TYPE = {
   wsOpenAck: 6,
   wsData: 7,
   closeStream: 8,
+  headPending: 9,
 } as const;
 
 export type HeaderPair = [name: string, value: string];
@@ -79,6 +83,11 @@ interface CloseStreamFrame {
   reason: string;
 }
 
+interface HeadPendingFrame {
+  type: "head-pending";
+  streamId: number;
+}
+
 export type Frame =
   | OpenHttpFrame
   | BodyChunkFrame
@@ -87,7 +96,8 @@ export type Frame =
   | OpenWsFrame
   | WsOpenAckFrame
   | WsDataFrame
-  | CloseStreamFrame;
+  | CloseStreamFrame
+  | HeadPendingFrame;
 
 const FRAME_TYPE_NAMES = new Map<number, Frame["type"]>([
   [FRAME_TYPE.openHttp, "open-http"],
@@ -98,6 +108,7 @@ const FRAME_TYPE_NAMES = new Map<number, Frame["type"]>([
   [FRAME_TYPE.wsOpenAck, "ws-open-ack"],
   [FRAME_TYPE.wsData, "ws-data"],
   [FRAME_TYPE.closeStream, "close-stream"],
+  [FRAME_TYPE.headPending, "head-pending"],
 ]);
 
 const FRAME_HEADER_BYTES = 5;
@@ -218,6 +229,12 @@ export function encodeFrame(frame: Frame): Uint8Array {
         frame.streamId,
         jsonPayload({ code: frame.code, reason: frame.reason }),
       );
+    case "head-pending":
+      return withHeader(
+        FRAME_TYPE.headPending,
+        frame.streamId,
+        new Uint8Array(0),
+      );
   }
 }
 
@@ -308,6 +325,8 @@ export function decodeFrame(message: ArrayBuffer | Uint8Array): Frame {
       );
       return { type: "close-stream", streamId, ...meta };
     }
+    case FRAME_TYPE.headPending:
+      return { type: "head-pending", streamId };
     default:
       throw new Error(`tunnel-contract: unknown frame type ${type}`);
   }
